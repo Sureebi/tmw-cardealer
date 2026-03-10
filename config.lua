@@ -5,6 +5,9 @@ Config.DealerJob = 'radko' -- Име на job-а който може да про
 Config.UseGang = true -- true = gang система, false = job система
 Config.Commission = 0.10 -- 10% комисионна за продавача
 
+-- Discord Webhook
+Config.DiscordWebhook = 'https://discord.com/api/webhooks/1480995591482904708/w9zhrLKczWEgmYbC8g_xowwdK_TCv_vgOT78SBgujDr_fzFFHv2i0etqWwkFBgHafZ6n'
+
 -- Garage Settings (не се използва вече, колата се спаунва директно)
 -- Config.GarageName = 'Central Garage'
 -- Config.StoredState = 0

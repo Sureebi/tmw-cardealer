@@ -64,6 +64,68 @@ local function GeneratePlate()
     return plate
 end
 
+-- Send Discord Webhook
+local function SendDiscordLog(seller, buyer, carData, price, commission)
+    if not Config.DiscordWebhook or Config.DiscordWebhook == '' then
+        return
+    end
+    
+    local sellerName = seller.PlayerData.charinfo.firstname .. ' ' .. seller.PlayerData.charinfo.lastname
+    local buyerName = buyer.PlayerData.charinfo.firstname .. ' ' .. buyer.PlayerData.charinfo.lastname
+    local timestamp = os.date('%Y-%m-%d %H:%M:%S')
+    
+    local priceFormatted = '$' .. tostring(price):reverse():gsub("(%d%d%d)", "%1,"):reverse():gsub("^,", "")
+    local commissionFormatted = '$' .. tostring(commission):reverse():gsub("(%d%d%d)", "%1,"):reverse():gsub("^,", "")
+    
+    local embed = {
+        {
+            ['title'] = '🚗 Vehicle Sale',
+            ['color'] = 3066993, -- Green color
+            ['fields'] = {
+                {
+                    ['name'] = '👤 Seller',
+                    ['value'] = sellerName .. ' (ID: ' .. seller.PlayerData.source .. ')',
+                    ['inline'] = true
+                },
+                {
+                    ['name'] = '👤 Buyer',
+                    ['value'] = buyerName .. ' (ID: ' .. buyer.PlayerData.source .. ')',
+                    ['inline'] = true
+                },
+                {
+                    ['name'] = '🚙 Vehicle',
+                    ['value'] = carData.label or carData.model,
+                    ['inline'] = true
+                },
+                {
+                    ['name'] = '💰 Price',
+                    ['value'] = priceFormatted,
+                    ['inline'] = true
+                },
+                {
+                    ['name'] = '💵 Commission',
+                    ['value'] = commissionFormatted,
+                    ['inline'] = true
+                },
+                {
+                    ['name'] = '🏦 Gang/Job Profit',
+                    ['value'] = '$' .. tostring(price - commission):reverse():gsub("(%d%d%d)", "%1,"):reverse():gsub("^,", ""),
+                    ['inline'] = true
+                }
+            },
+            ['footer'] = {
+                ['text'] = 'TMW Car Dealership'
+            },
+            ['timestamp'] = os.date('!%Y-%m-%dT%H:%M:%S')
+        }
+    }
+    
+    PerformHttpRequest(Config.DiscordWebhook, function(err, text, headers) end, 'POST', json.encode({
+        username = 'Car Dealership',
+        embeds = embed
+    }), { ['Content-Type'] = 'application/json' })
+end
+
 -- Check if player has enough money in bank
 local function HasBankMoney(source, amount)
     local player = QBCore.Functions.GetPlayer(source)
@@ -324,6 +386,9 @@ RegisterNetEvent('gang_dealership:sellCar', function(targetId, model, price)
     seller.Functions.AddMoney('cash', commission, 'dealership-commission')
     
     local plate = GeneratePlate()
+    
+    -- Send Discord log
+    SendDiscordLog(seller, buyer, carData, price, commission)
     
     local priceFormatted = tostring(price):reverse():gsub("(%d%d%d)", "%1,"):reverse():gsub("^,", "")
     local commissionFormatted = tostring(commission):reverse():gsub("(%d%d%d)", "%1,"):reverse():gsub("^,", "")
