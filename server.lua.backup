@@ -1,0 +1,657 @@
+-- QBCore/Qbox compatibility
+local QBCore = nil
+
+if GetResourceState('qb-core') == 'started' then
+    QBCore = exports['qb-core']:GetCoreObject()
+elseif GetResourceState('qbx_core') == 'started' then
+    QBCore = exports.qbx_core:GetCoreObject()
+elseif GetResourceState('qbx-core') == 'started' then
+    QBCore = exports['qbx-core']:GetCoreObject()
+end
+
+if not QBCore then
+    print('^1[car_showroom] ERROR: QBCore/Qbox not found!^7')
+end
+
+-- Showroom vehicles state (server-side)
+local showroomVehicles = {}
+local vehicleLocks = {} -- Кой гледа коя кола
+local isInitialized = false
+
+-- Initialize showroom vehicles from config
+local function InitializeShowroom()
+    if isInitialized then return end
+    
+    print('^3[car_showroom] Initializing showroom on server...^7')
+    
+    for i, car in ipairs(Config.ShowroomCars) do
+        local hasValidCoords = (car.coords.x ~= 0 and car.coords.y ~= 0)
+        
+        if hasValidCoords then
+            showroomVehicles[i] = {
+                model = car.model,
+                coords = car.coords,
+                config = car,
+                currentModel = car.model
+            }
+            vehicleLocks[i] = nil -- nil = unlocked
+            
+            print('^2[car_showroom] Initialized showroom spot ' .. i .. ': ' .. car.model .. '^7')
+        end
+    end
+    
+    isInitialized = true
+    print('^2[car_showroom] Server initialized with ' .. #showroomVehicles .. ' showroom spots^7')
+end
+
+-- Initialize on resource start
+CreateThread(function()
+    Wait(500) -- Малко изчакване за Config да се зареди
+    InitializeShowroom()
+end)
+
+-- Client requests to spawn initial vehicles
+RegisterNetEvent('gang_dealership:requestInitialSpawn', function()
+    local src = source
+    
+    print('^3[car_showroom] Server received spawn request from client ' .. src .. '^7')
+    
+    -- Увери се че е инициализирано
+    if not isInitialized then
+        print('^3[car_showroom] Server not initialized, initializing now...^7')
+        InitializeShowroom()
+    end
+    
+    print('^3[car_showroom] Server has ' .. #showroomVehicles .. ' vehicles to send^7')
+    
+    -- Използвай ipairs за да изпратиш всички коли в правилния ред
+    for i = 1, #showroomVehicles do
+        local spot = showroomVehicles[i]
+        if spot then
+            print('^3[car_showroom] Sending vehicle ' .. i .. ': ' .. spot.currentModel .. ' to client ' .. src .. '^7')
+            TriggerClientEvent('gang_dealership:spawnVehicle', src, i, spot.currentModel, spot.coords, spot.config)
+            Wait(100) -- Малко изчакване между колите
+        else
+            print('^1[car_showroom] ERROR: Spot ' .. i .. ' is nil!^7')
+        end
+    end
+    
+    print('^2[car_showroom] Finished sending vehicles to client ' .. src .. '^7')
+end)
+
+-- Client requests to change showroom car
+RegisterNetEvent('gang_dealership:requestChangeVehicle', function(spotIndex, newModel)
+    local src = source
+    
+    -- Check if spot exists
+    if not showroomVehicles[spotIndex] then
+        TriggerClientEvent('ox_lib:notify', src, {
+            title = 'Грешка',
+            description = 'Невалидно място!',
+            type = 'error'
+        })
+        return
+    end
+    
+    -- Check if spot is locked by another player
+    if vehicleLocks[spotIndex] and vehicleLocks[spotIndex] ~= src then
+        TriggerClientEvent('ox_lib:notify', src, {
+            title = 'Моля изчакай',
+            description = 'Друг играч разглежда тази кола...',
+            type = 'error'
+        })
+        return
+    end
+    
+    -- Find car config
+    local carConfig = nil
+    for _, car in ipairs(Config.ShowroomCars) do
+        if car.model == newModel then
+            carConfig = car
+            break
+        end
+    end
+    
+    if not carConfig then
+        TriggerClientEvent('ox_lib:notify', src, {
+            title = 'Грешка',
+            description = 'Невалиден модел!',
+            type = 'error'
+        })
+        return
+    end
+    
+    -- Update server state
+    showroomVehicles[spotIndex].currentModel = newModel
+    showroomVehicles[spotIndex].config = carConfig
+    
+    -- Notify all clients to change the vehicle
+    TriggerClientEvent('gang_dealership:changeVehicle', -1, spotIndex, newModel, carConfig)
+    
+    print('^2[car_showroom] Spot ' .. spotIndex .. ' changed to: ' .. newModel .. '^7')
+end)
+
+-- Lock/unlock spot when player opens/closes menu
+RegisterNetEvent('gang_dealership:lockSpot', function(spotIndex, lock)
+    local src = source
+    
+    if not showroomVehicles[spotIndex] then return end
+    
+    if lock then
+        vehicleLocks[spotIndex] = src
+        print('^3[car_showroom] Player ' .. src .. ' locked spot ' .. spotIndex .. '^7')
+    else
+        if vehicleLocks[spotIndex] == src then
+            vehicleLocks[spotIndex] = nil
+            print('^3[car_showroom] Player ' .. src .. ' unlocked spot ' .. spotIndex .. '^7')
+        end
+    end
+end)
+
+-- Cleanup when player disconnects
+AddEventHandler('playerDropped', function()
+    local src = source
+    
+    -- Unlock any spots locked by this player
+    for i, lockOwner in pairs(vehicleLocks) do
+        if lockOwner == src then
+            vehicleLocks[i] = nil
+            print('^3[car_showroom] Auto-unlocked spot ' .. i .. ' (player disconnected)^7')
+        end
+    end
+end)
+
+-- Generate Random Plate
+local function GeneratePlate()
+    local plate = ''
+    for i = 1, 3 do
+        plate = plate .. string.char(math.random(65, 90))
+    end
+    plate = plate .. math.random(100, 999)
+    return plate
+end
+
+-- Check if player has enough money in bank
+local function HasBankMoney(source, amount)
+    local player = QBCore.Functions.GetPlayer(source)
+    if not player then return false end
+    
+    -- Try renewed-banking first if available
+    if GetResourceState('Renewed-Banking') == 'started' then
+        local accountMoney = exports['renewed-banking']:getAccountMoney(player.PlayerData.citizenid, 'checking')
+        return accountMoney and accountMoney >= amount
+    end
+    
+    -- Fallback to QBCore bank
+    return player.PlayerData.money.bank >= amount
+end
+
+-- Remove money from bank
+local function RemoveBankMoney(source, amount, reason)
+    local player = QBCore.Functions.GetPlayer(source)
+    if not player then return false end
+    
+    -- Try renewed-banking first if available
+    if GetResourceState('Renewed-Banking') == 'started' then
+        return exports['renewed-banking']:removeAccountMoney(player.PlayerData.citizenid, 'checking', amount, {
+            message = reason or 'Gang Dealership Purchase',
+            title = 'Gang Dealership',
+            type = 'vehicle'
+        })
+    end
+    
+    -- Fallback to QBCore bank
+    return player.Functions.RemoveMoney('bank', amount, reason or 'dealership-purchase')
+end
+
+-- Sell Car Event
+RegisterNetEvent('gang_dealership:sellCar', function(targetId, model, price)
+    local src = source
+    local seller = QBCore.Functions.GetPlayer(src)
+    local buyer = QBCore.Functions.GetPlayer(targetId)
+    
+    if not seller or not buyer then
+        TriggerClientEvent('ox_lib:notify', src, {
+            title = 'Грешка',
+            description = 'Играчът не е намерен!',
+            type = 'error'
+        })
+        return
+    end
+    
+    -- Check if seller has dealer job/gang
+    local hasAccess = false
+    if Config.UseGang then
+        hasAccess = seller.PlayerData.gang.name == Config.DealerJob
+    else
+        hasAccess = seller.PlayerData.job.name == Config.DealerJob
+    end
+    
+    if not hasAccess then
+        TriggerClientEvent('ox_lib:notify', src, {
+            title = 'Грешка',
+            description = 'Нямаш право да продаваш коли!',
+            type = 'error'
+        })
+        return
+    end
+    
+    -- Validate car model
+    local carData = nil
+    for _, car in ipairs(Config.ShowroomCars) do
+        if car.model == model then
+            carData = car
+            break
+        end
+    end
+    
+    if not carData then
+        TriggerClientEvent('ox_lib:notify', src, {
+            title = 'Грешка',
+            description = 'Невалиден модел кола!',
+            type = 'error'
+        })
+        return
+    end
+    
+    -- Check buyer's bank account
+    if not HasBankMoney(targetId, price) then
+        TriggerClientEvent('ox_lib:notify', src, {
+            title = 'Грешка',
+            description = 'Купувачът няма достатъчно пари в банката!',
+            type = 'error'
+        })
+        TriggerClientEvent('ox_lib:notify', targetId, {
+            title = 'Грешка',
+            description = 'Нямаш достатъчно пари в банката!',
+            type = 'error'
+        })
+        return
+    end
+    
+    -- Calculate commission
+    local commission = math.floor(price * Config.Commission)
+    
+    -- Process payment - вземи парите от купувача
+    local success = RemoveBankMoney(targetId, price, 'Покупка на автомобил: ' .. (carData.label or model))
+    
+    if not success then
+        TriggerClientEvent('ox_lib:notify', src, {
+            title = 'Грешка',
+            description = 'Грешка при транзакцията!',
+            type = 'error'
+        })
+        return
+    end
+    
+    -- Добави парите в gang/job account (renewed-banking)
+    
+    if GetResourceState('Renewed-Banking') == 'started' then
+        -- Добави парите в gang/job account
+        local gangProfit = price - commission
+        local accountAdded = exports['Renewed-Banking']:addAccountMoney(gangName, gangProfit)
+        
+        if not accountAdded then
+            print('^1[Gang Dealership] ERROR: Failed to add money to gang account: ' .. gangName .. '^7')
+            -- Върни парите на купувача ако не успее
+            if GetResourceState('Renewed-Banking') == 'started' then
+                exports['Renewed-Banking']:addAccountMoney(buyer.PlayerData.citizenid, price)
+            else
+                buyer.Functions.AddMoney('bank', price, 'dealership-refund')
+            end
+            
+            TriggerClientEvent('ox_lib:notify', src, {
+                title = 'Грешка',
+                description = 'Грешка при добавяне на парите в хазната!',
+                type = 'error'
+            })
+            return
+        end
+        
+        print('^2[Gang Dealership] Successfully added ' .. price .. ' to gang account: ' .. gangName .. '^7')
+    else
+        print('^3[Gang Dealership] WARNING: renewed-banking not found, money not added to gang account^7')
+    end
+    
+    -- Pay commission to seller (в брой)
+    seller.Functions.AddMoney('cash', commission, 'dealership-commission')
+    
+    -- Generate plate and spawn car for buyer
+    local plate = GeneratePlate()
+    
+    -- Notify both parties
+    local priceFormatted = tostring(price):reverse():gsub("(%d%d%d)", "%1,"):reverse():gsub("^,", "")
+    local commissionFormatted = tostring(commission):reverse():gsub("(%d%d%d)", "%1,"):reverse():gsub("^,", "")
+    
+    TriggerClientEvent('ox_lib:notify', src, {
+        title = 'Продажба успешна',
+        description = string.format('Получи $%s комисионна!', commissionFormatted),
+        type = 'success'
+    })
+    
+    TriggerClientEvent('ox_lib:notify', targetId, {
+        title = 'Покупка',
+        description = string.format('Закупи %s за $%s', carData.label or model, priceFormatted),
+        type = 'info'
+    })
+    
+    -- Trigger car spawn on buyer's client
+    TriggerClientEvent('gang_dealership:receiveCar', targetId, model, plate, carData)
+end)
+
+-- Save Vehicle to Database (за qbx_garages)
+RegisterNetEvent('gang_dealership:saveVehicle', function(props, plate, modelName)
+    local src = source
+    local player = QBCore.Functions.GetPlayer(src)
+    
+    if not player then 
+        print('[Gang Dealership] ERROR: Player not found when saving vehicle')
+        return 
+    end
+    
+    print('^3[Gang Dealership] Saving vehicle to DB...^7')
+    print('^3Model: ' .. modelName .. ', Plate: ' .. plate .. '^7')
+    print('^3Citizenid: ' .. player.PlayerData.citizenid .. '^7')
+    print('^3Props model hash: ' .. tostring(props.model) .. '^7')
+    print('^3Props plate: ' .. tostring(props.plate) .. '^7')
+    
+    -- Debug: Покажи цветовете
+    if props.color1 then
+        print('^3Color1: ' .. tostring(props.color1) .. '^7')
+    end
+    if props.pearlescentColor then
+        print('^3Pearlescent: ' .. tostring(props.pearlescentColor) .. '^7')
+    end
+    
+    -- qbx_garages използва player_vehicles таблица
+    -- Полета: id, citizenid, vehicle, hash, mods, plate, garage, state, depotprice, drivingdistance, status
+    exports.oxmysql:insert('INSERT INTO player_vehicles (citizenid, vehicle, hash, mods, plate, state) VALUES (?, ?, ?, ?, ?, ?)', {
+        player.PlayerData.citizenid,
+        modelName, -- String име на модела
+        props.model, -- Hash на модела
+        json.encode(props),
+        plate,
+        0 -- 0 = out, 1 = garaged, 2 = impounded
+    }, function(insertId)
+        if insertId then
+            print(string.format('^2[Gang Dealership] Vehicle saved to DB successfully. ID: %s, Plate: %s^7', insertId, plate))
+            TriggerClientEvent('ox_lib:notify', src, {
+                title = 'Успех',
+                description = 'Колата е записана в системата!',
+                type = 'success'
+            })
+        else
+            print('^1[Gang Dealership] ERROR: Insert returned no ID^7')
+            TriggerClientEvent('ox_lib:notify', src, {
+                title = 'Грешка',
+                description = 'Проблем при записване в базата данни!',
+                type = 'error'
+            })
+        end
+    end)
+end)
+
+-- Command to check nearby players (helper for dealers)
+QBCore.Commands.Add('nearby', 'Виж близки играчи', {}, false, function(source)
+    local src = source
+    local player = QBCore.Functions.GetPlayer(src)
+    
+    -- Check if player has dealer job/gang
+    local hasAccess = false
+    if Config.UseGang then
+        hasAccess = player.PlayerData.gang.name == Config.DealerJob
+    else
+        hasAccess = player.PlayerData.job.name == Config.DealerJob
+    end
+    
+    if not hasAccess then
+        TriggerClientEvent('ox_lib:notify', src, {
+            title = 'Грешка',
+            description = 'Нямаш достъп до тази команда!',
+            type = 'error'
+        })
+        return
+    end
+    
+    local players = QBCore.Functions.GetPlayers()
+    local ped = GetPlayerPed(src)
+    local coords = GetEntityCoords(ped)
+    local nearby = {}
+    
+    for _, playerId in ipairs(players) do
+        local targetPed = GetPlayerPed(playerId)
+        local targetCoords = GetEntityCoords(targetPed)
+        local distance = #(coords - targetCoords)
+        
+        if distance < 10.0 and playerId ~= src then
+            local targetPlayer = QBCore.Functions.GetPlayer(playerId)
+            if targetPlayer then
+                nearby[#nearby + 1] = string.format('ID: %d | %s %s | Разстояние: %.1fm', 
+                    playerId, 
+                    targetPlayer.PlayerData.charinfo.firstname,
+                    targetPlayer.PlayerData.charinfo.lastname,
+                    distance)
+            end
+        end
+    end
+    
+    if #nearby > 0 then
+        TriggerClientEvent('ox_lib:notify', src, {
+            title = 'Близки играчи',
+            description = table.concat(nearby, '\n'),
+            type = 'info',
+            duration = 8000
+        })
+    else
+        TriggerClientEvent('ox_lib:notify', src, {
+            title = 'Близки играчи',
+            description = 'Няма играчи наблизо',
+            type = 'info'
+        })
+    end
+end)
+
+-- Debug command to check vehicle in database
+QBCore.Commands.Add('checkcar', 'Провери кола в базата данни', {{name = 'plate', help = 'Номер на колата'}}, true, function(source, args)
+    local src = source
+    local plate = args[1]
+    
+    exports.oxmysql:query('SELECT * FROM player_vehicles WHERE plate = ?', {plate}, function(result)
+        if result and result[1] then
+            local veh = result[1]
+            print('^2[Gang Dealership] Vehicle found in database:^7')
+            print('License: ' .. tostring(veh.license))
+            print('Citizenid: ' .. tostring(veh.citizenid))
+            print('Vehicle: ' .. tostring(veh.vehicle))
+            print('Plate: ' .. tostring(veh.plate))
+            print('Garage: ' .. tostring(veh.garage))
+            print('State: ' .. tostring(veh.state))
+            
+            TriggerClientEvent('ox_lib:notify', src, {
+                title = 'Кола намерена',
+                description = string.format('Vehicle: %s\nGarage: %s\nState: %s', veh.vehicle, veh.garage or 'NULL', veh.state),
+                type = 'success',
+                duration = 8000
+            })
+        else
+            print('^1[Gang Dealership] Vehicle NOT found in database with plate: ' .. plate .. '^7')
+            TriggerClientEvent('ox_lib:notify', src, {
+                title = 'Грешка',
+                description = 'Колата не е намерена в базата данни!',
+                type = 'error'
+            })
+        end
+    end)
+end)
+    
+    -- Pay commission to seller (в брой)
+    seller.Functions.AddMoney('cash', commission, 'dealership-commission')
+    
+    -- Generate plate and spawn car for buyer
+    local plate = GeneratePlate()
+    
+    -- Notify both parties
+    local priceFormatted = tostring(price):reverse():gsub("(%d%d%d)", "%1,"):reverse():gsub("^,", "")
+    local commissionFormatted = tostring(commission):reverse():gsub("(%d%d%d)", "%1,"):reverse():gsub("^,", "")
+    
+    TriggerClientEvent('ox_lib:notify', src, {
+        title = 'Продажба успешна',
+        description = string.format('Получи $%s комисионна!', commissionFormatted),
+        type = 'success'
+    })
+    
+    TriggerClientEvent('ox_lib:notify', targetId, {
+        title = 'Покупка',
+        description = string.format('Закупи %s за $%s', carData.label or model, priceFormatted),
+        type = 'info'
+    })
+    
+    -- Trigger car spawn on buyer's client
+    TriggerClientEvent('gang_dealership:receiveCar', targetId, model, plate, carData)
+end)
+
+-- Save Vehicle to Database (за qbx_garages)
+RegisterNetEvent('gang_dealership:saveVehicle', function(props, plate, modelName)
+    local src = source
+    local player = QBCore.Functions.GetPlayer(src)
+    
+    if not player then 
+        print('[Gang Dealership] ERROR: Player not found when saving vehicle')
+        return 
+    end
+    
+    print('^3[Gang Dealership] Saving vehicle to DB...^7')
+    print('^3Model: ' .. modelName .. ', Plate: ' .. plate .. '^7')
+    print('^3Citizenid: ' .. player.PlayerData.citizenid .. '^7')
+    print('^3Props model hash: ' .. tostring(props.model) .. '^7')
+    print('^3Props plate: ' .. tostring(props.plate) .. '^7')
+    
+    -- Debug: Покажи цветовете
+    if props.color1 then
+        print('^3Color1: ' .. tostring(props.color1) .. '^7')
+    end
+    if props.pearlescentColor then
+        print('^3Pearlescent: ' .. tostring(props.pearlescentColor) .. '^7')
+    end
+    
+    -- qbx_garages използва player_vehicles таблица
+    -- Полета: id, citizenid, vehicle, hash, mods, plate, garage, state, depotprice, drivingdistance, status
+    exports.oxmysql:insert('INSERT INTO player_vehicles (citizenid, vehicle, hash, mods, plate, state) VALUES (?, ?, ?, ?, ?, ?)', {
+        player.PlayerData.citizenid,
+        modelName, -- String име на модела
+        props.model, -- Hash на модела
+        json.encode(props),
+        plate,
+        0 -- 0 = out, 1 = garaged, 2 = impounded
+    }, function(insertId)
+        if insertId then
+            print(string.format('^2[Gang Dealership] Vehicle saved to DB successfully. ID: %s, Plate: %s^7', insertId, plate))
+            TriggerClientEvent('ox_lib:notify', src, {
+                title = 'Успех',
+                description = 'Колата е записана в системата!',
+                type = 'success'
+            })
+        else
+            print('^1[Gang Dealership] ERROR: Insert returned no ID^7')
+            TriggerClientEvent('ox_lib:notify', src, {
+                title = 'Грешка',
+                description = 'Проблем при записване в базата данни!',
+                type = 'error'
+            })
+        end
+    end)
+end)
+
+-- Command to check nearby players (helper for dealers)
+QBCore.Commands.Add('nearby', 'Виж близки играчи', {}, false, function(source)
+    local src = source
+    local player = QBCore.Functions.GetPlayer(src)
+    
+    -- Check if player has dealer job/gang
+    local hasAccess = false
+    if Config.UseGang then
+        hasAccess = player.PlayerData.gang.name == Config.DealerJob
+    else
+        hasAccess = player.PlayerData.job.name == Config.DealerJob
+    end
+    
+    if not hasAccess then
+        TriggerClientEvent('ox_lib:notify', src, {
+            title = 'Грешка',
+            description = 'Нямаш достъп до тази команда!',
+            type = 'error'
+        })
+        return
+    end
+    
+    local players = QBCore.Functions.GetPlayers()
+    local ped = GetPlayerPed(src)
+    local coords = GetEntityCoords(ped)
+    local nearby = {}
+    
+    for _, playerId in ipairs(players) do
+        local targetPed = GetPlayerPed(playerId)
+        local targetCoords = GetEntityCoords(targetPed)
+        local distance = #(coords - targetCoords)
+        
+        if distance < 10.0 and playerId ~= src then
+            local targetPlayer = QBCore.Functions.GetPlayer(playerId)
+            if targetPlayer then
+                nearby[#nearby + 1] = string.format('ID: %d | %s %s | Разстояние: %.1fm', 
+                    playerId, 
+                    targetPlayer.PlayerData.charinfo.firstname,
+                    targetPlayer.PlayerData.charinfo.lastname,
+                    distance)
+            end
+        end
+    end
+    
+    if #nearby > 0 then
+        TriggerClientEvent('ox_lib:notify', src, {
+            title = 'Близки играчи',
+            description = table.concat(nearby, '\n'),
+            type = 'info',
+            duration = 8000
+        })
+    else
+        TriggerClientEvent('ox_lib:notify', src, {
+            title = 'Близки играчи',
+            description = 'Няма играчи наблизо',
+            type = 'info'
+        })
+    end
+end)
+
+-- Debug command to check vehicle in database
+QBCore.Commands.Add('checkcar', 'Провери кола в базата данни', {{name = 'plate', help = 'Номер на колата'}}, true, function(source, args)
+    local src = source
+    local plate = args[1]
+    
+    exports.oxmysql:query('SELECT * FROM player_vehicles WHERE plate = ?', {plate}, function(result)
+        if result and result[1] then
+            local veh = result[1]
+            print('^2[Gang Dealership] Vehicle found in database:^7')
+            print('License: ' .. tostring(veh.license))
+            print('Citizenid: ' .. tostring(veh.citizenid))
+            print('Vehicle: ' .. tostring(veh.vehicle))
+            print('Plate: ' .. tostring(veh.plate))
+            print('Garage: ' .. tostring(veh.garage))
+            print('State: ' .. tostring(veh.state))
+            
+            TriggerClientEvent('ox_lib:notify', src, {
+                title = 'Кола намерена',
+                description = string.format('Vehicle: %s\nGarage: %s\nState: %s', veh.vehicle, veh.garage or 'NULL', veh.state),
+                type = 'success',
+                duration = 8000
+            })
+        else
+            print('^1[Gang Dealership] Vehicle NOT found in database with plate: ' .. plate .. '^7')
+            TriggerClientEvent('ox_lib:notify', src, {
+                title = 'Грешка',
+                description = 'Колата не е намерена в базата данни!',
+                type = 'error'
+            })
+        end
+    end)
+end)
+
